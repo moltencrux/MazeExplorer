@@ -42,7 +42,7 @@ public class MazeSolverApp extends JFrame {
     private final JComboBox<String> explorerSelector = new JComboBox<>(EXPLORERS.keySet().toArray(new String[0]));
     private final JButton newMazeButton = new JButton("New Maze");
     private final JButton startButton = new JButton("Start Solving");
-    private final JSlider speedSlider = new JSlider(1, 100, 60);
+    private final JSlider speedSlider = new JSlider(1, 100, 100);
     private final JLabel statusLabel = new JLabel(" ");
 
     public MazeSolverApp() {
@@ -81,10 +81,9 @@ public class MazeSolverApp extends JFrame {
     }
 
     private void applySpeed() {
-        // Slider is 1 (slowest) .. 100 (fastest). Map to an animation
-        // duration in ms, higher slider value = shorter duration.
+        // Slider is 1 (slowest) .. 100 (fastest).
         int value = speedSlider.getValue();
-        int durationMs = (int) (400 - (value / 100.0) * 380); // ranges ~ 20ms .. 400ms
+        int durationMs = (int) Math.round(100 * ((100 - value) / 100.0)); // ~600ms .. 0ms
         if (engine != null) {
             engine.setAnimationDurationMs(durationMs);
         }

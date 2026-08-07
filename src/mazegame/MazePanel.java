@@ -13,18 +13,21 @@ import java.util.concurrent.CountDownLatch;
  */
 public class MazePanel extends JPanel {
 
-    private static final int ANIMATION_STEPS = 20;
+    private static final int MAX_ANIMATION_STEPS = 20;
 
     private Maze maze;
     private Deque<Cell> pathStack;
     private int cellSize = 22;
 
+    // Static maze background (walls/open cells, gridlines, start/goal
+    // markers) rendered once per maze and reused every frame -- redrawing
+    // ~1000+ cells from scratch on every animation tick was the real
+    // bottleneck, independent of the timer delay.
+    private java.awt.image.BufferedImage backgroundCache;
+
     // Sprite's current draw position, in pixels (panel-local, top-left of grid).
     private double spriteX, spriteY;
     private Cell spriteCell;
-
-    // Used to draw a brief "bump" nudge when a move fails against a wall.
-    private double bumpOffsetX = 0, bumpOffsetY = 0;
 
     public MazePanel() {
         setBackground(new Color(0xF5F5F5));
@@ -33,8 +36,37 @@ public class MazePanel extends JPanel {
     void setEngineState(Maze maze, Deque<Cell> pathStack, Cell startCell) {
         this.maze = maze;
         this.pathStack = pathStack;
+        rebuildBackgroundCache();
         resetSprite(startCell);
         updatePreferredSize();
+    }
+
+    private void rebuildBackgroundCache() {
+        int w = maze.getCols() * cellSize + 1;
+        int h = maze.getRows() * cellSize + 1;
+        backgroundCache = new java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = backgroundCache.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+        for (int r = 0; r < maze.getRows(); r++) {
+            for (int c = 0; c < maze.getCols(); c++) {
+                boolean open = maze.isOpen(r, c);
+                g.setColor(open ? Color.WHITE : new Color(0x2B2B3A));
+                g.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
+            }
+        }
+
+        drawMarker(g, maze.getStart(), new Color(0x4CAF50), "S");
+        drawMarker(g, maze.getGoal(), new Color(0xFFB300), "G");
+
+        g.setColor(new Color(0, 0, 0, 25));
+        for (int r = 0; r <= maze.getRows(); r++) {
+            g.drawLine(0, r * cellSize, maze.getCols() * cellSize, r * cellSize);
+        }
+        for (int c = 0; c <= maze.getCols(); c++) {
+            g.drawLine(c * cellSize, 0, c * cellSize, maze.getRows() * cellSize);
+        }
+        g.dispose();
     }
 
     void resetSprite(Cell cell) {
@@ -42,8 +74,6 @@ public class MazePanel extends JPanel {
         Point2D p = cellCenter(cell);
         this.spriteX = p.x;
         this.spriteY = p.y;
-        this.bumpOffsetX = 0;
-        this.bumpOffsetY = 0;
         repaint();
     }
 
@@ -65,21 +95,32 @@ public class MazePanel extends JPanel {
 
     /** Animate a smooth slide from one cell to an adjacent, open cell. */
     void animateMove(Cell from, Cell to, CountDownLatch latch) {
-        Point2D fromPx = cellCenter(from);
         Point2D toPx = cellCenter(to);
         spriteCell = to;
 
+        int steps = stepsForDuration();
+        if (steps <= 1) {
+            // Fast enough that a multi-frame slide isn't worth the repaint cost.
+            spriteX = toPx.x;
+            spriteY = toPx.y;
+            repaint();
+            latch.countDown();
+            return;
+        }
+
+        Point2D fromPx = cellCenter(from);
+        int perStepDelay = Math.max(1, externalAnimationDurationMs / steps);
         Timer[] timerHolder = new Timer[1];
         int[] step = {0};
-        Timer timer = new Timer(Math.max(1, animationStepDelay()), null);
+        Timer timer = new Timer(perStepDelay, null);
         timer.addActionListener(e -> {
             step[0]++;
-            double t = Math.min(1.0, step[0] / (double) ANIMATION_STEPS);
+            double t = Math.min(1.0, step[0] / (double) steps);
             t = easeInOut(t);
             spriteX = fromPx.x + (toPx.x - fromPx.x) * t;
             spriteY = fromPx.y + (toPx.y - fromPx.y) * t;
             repaint();
-            if (step[0] >= ANIMATION_STEPS) {
+            if (step[0] >= steps) {
                 timerHolder[0].stop();
                 spriteX = toPx.x;
                 spriteY = toPx.y;
@@ -93,15 +134,22 @@ public class MazePanel extends JPanel {
 
     /** Animate a small nudge toward a wall that blocked the move, then snap back. */
     void animateBump(Cell at, Direction dir, CountDownLatch latch) {
+        int steps = stepsForDuration();
+        if (steps <= 1) {
+            latch.countDown();
+            return;
+        }
+
         Point2D center = cellCenter(at);
         double nudge = cellSize * 0.28;
         double targetX = center.x + dir.dCol * nudge;
         double targetY = center.y + dir.dRow * nudge;
 
-        int totalSteps = 10; // out and back
+        int totalSteps = Math.max(2, steps / 2); // out and back
+        int perStepDelay = Math.max(1, externalAnimationDurationMs / totalSteps / 2);
         Timer[] timerHolder = new Timer[1];
         int[] step = {0};
-        Timer timer = new Timer(Math.max(1, animationStepDelay() / 2), null);
+        Timer timer = new Timer(perStepDelay, null);
         timer.addActionListener(e -> {
             step[0]++;
             double t = step[0] / (double) totalSteps;
@@ -124,11 +172,21 @@ public class MazePanel extends JPanel {
     private volatile int externalAnimationDurationMs = 150;
 
     void setAnimationDurationMs(int ms) {
-        this.externalAnimationDurationMs = Math.max(5, ms);
+        this.externalAnimationDurationMs = Math.max(0, ms);
     }
 
-    private int animationStepDelay() {
-        return Math.max(1, externalAnimationDurationMs / ANIMATION_STEPS);
+    /**
+     * How many discrete animation frames a move gets, scaled down as the
+     * requested duration shrinks. At very low durations this collapses to 1
+     * (i.e. an instant snap, no Timer/repaint overhead at all), which is
+     * what actually lets the "fast" end of the speed slider feel fast --
+     * previously every move did a fixed 20 timer-fire+repaint cycles no
+     * matter how small the requested delay was.
+     */
+    private int stepsForDuration() {
+        if (externalAnimationDurationMs <= 4) return 1;
+        int steps = externalAnimationDurationMs / 4; // ~1 frame per 4ms
+        return Math.max(1, Math.min(MAX_ANIMATION_STEPS, steps));
     }
 
     private static double easeInOut(double t) {
@@ -138,24 +196,17 @@ public class MazePanel extends JPanel {
     @Override
     protected void paintComponent(Graphics g0) {
         super.paintComponent(g0);
-        if (maze == null) return;
+        if (maze == null || backgroundCache == null) return;
         Graphics2D g = (Graphics2D) g0;
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-        // Grid
-        for (int r = 0; r < maze.getRows(); r++) {
-            for (int c = 0; c < maze.getCols(); c++) {
-                boolean open = maze.isOpen(r, c);
-                g.setColor(open ? Color.WHITE : new Color(0x2B2B3A));
-                g.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
-            }
-        }
+        // Static grid/walls/gridlines/markers -- drawn once per maze, blitted every frame.
+        g.drawImage(backgroundCache, 0, 0, null);
 
         // Trail: every cell in the current path except the one the sprite is on
         if (pathStack != null) {
             g.setColor(new Color(0x9FD8FF));
             int idx = 0;
-            int size = pathStack.size();
             for (Cell c : pathStack) {
                 if (idx > 0) { // skip the head (current sprite cell)
                     int pad = 4;
@@ -164,19 +215,6 @@ public class MazePanel extends JPanel {
                 }
                 idx++;
             }
-        }
-
-        // Start & goal markers
-        drawMarker(g, maze.getStart(), new Color(0x4CAF50), "S");
-        drawMarker(g, maze.getGoal(), new Color(0xFFB300), "G");
-
-        // Grid lines (subtle)
-        g.setColor(new Color(0, 0, 0, 25));
-        for (int r = 0; r <= maze.getRows(); r++) {
-            g.drawLine(0, r * cellSize, maze.getCols() * cellSize, r * cellSize);
-        }
-        for (int c = 0; c <= maze.getCols(); c++) {
-            g.drawLine(c * cellSize, 0, c * cellSize, maze.getRows() * cellSize);
         }
 
         // Sprite
