@@ -1,0 +1,55 @@
+# Editor
+.*.sw?
+.swp*
+
+# Project data (large, generated)
+tmp/
+
+# Compiled class files
+*.class
+*.exe
+*.jar
+*.war
+*.ear
+
+# Build output directories
+target/
+build/
+dist/
+out/
+
+# Maven
+.mvn/
+mvnw
+mvnw.cmd
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+
+# Gradle
+.gradle/
+build/
+.gradletasknamecache
+!gradle-wrapper.jar
+!gradle-wrapper.properties
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+*.sublime-workspace
+*.sublime-project
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Environment files
+.env
+.env.local
+.env.*.local
