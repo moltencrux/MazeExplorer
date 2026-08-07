@@ -11,7 +11,7 @@ import java.util.Map;
 /**
  * The runnable entry point. Builds the window, wires up the maze / engine /
  * panel, and provides simple controls for generating a new maze, picking an
- * Explorer strategy, running it, and adjusting animation speed.
+ * Explorer strategy, running it, stopping it, and adjusting animation speed.
  *
  * ------------------------------------------------------------------------
  * STUDENTS: to add your own strategy, subclass BaseExplorer (see
@@ -42,7 +42,8 @@ public class MazeSolverApp extends JFrame {
     private final JComboBox<String> explorerSelector = new JComboBox<>(EXPLORERS.keySet().toArray(new String[0]));
     private final JButton newMazeButton = new JButton("New Maze");
     private final JButton startButton = new JButton("Start Solving");
-    private final JSlider speedSlider = new JSlider(1, 100, 100);
+    private final JButton stopButton = new JButton("Stop");
+    private final JSlider speedSlider = new JSlider(1, 100, 60);
     private final JLabel statusLabel = new JLabel(" ");
 
     public MazeSolverApp() {
@@ -65,6 +66,7 @@ public class MazeSolverApp extends JFrame {
         controls.add(new JLabel("Explorer:"));
         controls.add(explorerSelector);
         controls.add(startButton);
+        controls.add(stopButton);
         controls.add(newMazeButton);
         controls.add(new JLabel("Speed:"));
         speedSlider.setPreferredSize(new Dimension(120, speedSlider.getPreferredSize().height));
@@ -73,6 +75,7 @@ public class MazeSolverApp extends JFrame {
 
         newMazeButton.addActionListener(e -> generateNewMaze());
         startButton.addActionListener(e -> startSolving());
+        stopButton.addActionListener(e -> stopSolving());
         speedSlider.addChangeListener(e -> applySpeed());
 
         JPanel wrapper = new JPanel(new BorderLayout());
@@ -80,8 +83,15 @@ public class MazeSolverApp extends JFrame {
         return wrapper;
     }
 
+    private void setRunning(boolean running) {
+        startButton.setEnabled(!running);
+        explorerSelector.setEnabled(!running);
+        stopButton.setEnabled(running);
+    }
+
     private void applySpeed() {
-        // Slider is 1 (slowest) .. 100 (fastest).
+        // Slider is 1 (slowest) .. 100 (fastest). Map to an animation
+        // duration in ms, higher slider value = shorter duration.
         int value = speedSlider.getValue();
         int durationMs = (int) Math.round(100 * ((100 - value) / 100.0)); // ~600ms .. 0ms
         if (engine != null) {
@@ -98,6 +108,7 @@ public class MazeSolverApp extends JFrame {
         engine.setGoalListener(this::onGoalReached);
         applySpeed();
         statusLabel.setText(" ");
+        setRunning(false);
         panel.revalidate();
         panel.repaint();
         SwingUtilities.invokeLater(this::pack);
@@ -109,10 +120,20 @@ public class MazeSolverApp extends JFrame {
         if (factory == null) return;
         BaseExplorer explorer = factory.get();
         statusLabel.setText("Solving with: " + name);
+        setRunning(true);
         engine.start(explorer);
     }
 
+    private void stopSolving() {
+        if (engine != null) {
+            engine.stopCurrent();
+            statusLabel.setText("Stopped.");
+        }
+        setRunning(false);
+    }
+
     private void onGoalReached(int moveCount, int pathLength) {
+        setRunning(false);
         statusLabel.setText("Solved! " + moveCount + " moves attempted, final path length " + pathLength + ".");
         String message = String.format(
                 "You reached the goal!%n%nMoves attempted: %d%nFinal path length: %d squares%n%nPlay again with a new maze?",
