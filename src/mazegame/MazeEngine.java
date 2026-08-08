@@ -83,35 +83,43 @@ public class MazeEngine {
         }
     }
 
+    /**
+     * Clears the path, move counter and sprite back to the maze entrance.
+     * Does <em>not</em> start a solver thread. Any running/paused solver is stopped.
+     */
+    public void resetToStart() {
+	stopCurrent();
+	try {
+	    if (solverThread != null) solverThread.join(200);
+	} catch (InterruptedException ignored) {
+	}
+
+	pathStack.clear();
+	pathStack.push(maze.getStart());
+	moveCount.set(0);
+	gameOver = false;
+	paused = false;
+	panel.resetSprite(maze.getStart());
+	panel.repaint();
+    }
+
     /** Starts a fresh run of the given explorer instance on a background thread. */
     public void start(BaseExplorer explorer) {
-        stopCurrent();
-        try {
-            if (solverThread != null) solverThread.join(200);
-        } catch (InterruptedException ignored) {
-        }
+	resetToStart();                 // stop + clear state
 
-        pathStack.clear();
-        pathStack.push(maze.getStart());
-        moveCount.set(0);
-        gameOver = false;
-        paused = false;
-        panel.resetSprite(maze.getStart());
-        panel.repaint();
-
-        explorer.bind(this);
-        solverThread = new Thread(() -> {
-            try {
-                explorer.solve();
-            } catch (MazeStoppedException ignored) {
-                // normal: the maze was reset / stopped while we were running
-            } catch (Exception ex) {
-                System.err.println("Explorer threw an exception:");
-                ex.printStackTrace();
-            }
-        }, "MazeSolverThread");
-        solverThread.setDaemon(true);
-        solverThread.start();
+	explorer.bind(this);
+	solverThread = new Thread(() -> {
+	    try {
+		explorer.solve();
+	    } catch (MazeStoppedException ignored) {
+		// normal: the maze was reset / stopped while we were running
+	    } catch (Exception ex) {
+		System.err.println("Explorer threw an exception:");
+		ex.printStackTrace();
+	    }
+	}, "MazeSolverThread");
+	solverThread.setDaemon(true);
+	solverThread.start();
     }
 
     private void waitIfPaused() {

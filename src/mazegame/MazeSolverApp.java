@@ -11,7 +11,7 @@ import java.util.Map;
 /**
  * The runnable entry point. Builds the window, wires up the maze / engine /
  * panel, and provides simple controls for generating a new maze, picking an
- * Explorer strategy, running / pausing / stopping it, and adjusting animation speed.
+ * Explorer strategy, running / pausing / resetting it, and adjusting animation speed.
  *
  * ------------------------------------------------------------------------
  * STUDENTS: to add your own strategy, subclass BaseExplorer (see
@@ -42,7 +42,7 @@ public class MazeSolverApp extends JFrame {
     private final JComboBox<String> explorerSelector = new JComboBox<>(EXPLORERS.keySet().toArray(new String[0]));
     private final JButton newMazeButton = new JButton("New Maze");
     private final JButton startButton = createPlayPauseButton();
-    private final JButton stopButton = createStopButton();
+    private final JButton resetButton = createResetButton();
     private final JSlider speedSlider = new JSlider(1, 100, 60);
     private final JLabel statusLabel = new JLabel(" ");
 
@@ -68,7 +68,7 @@ public class MazeSolverApp extends JFrame {
         controls.add(new JLabel("Explorer:"));
         controls.add(explorerSelector);
         controls.add(startButton);
-        controls.add(stopButton);
+        controls.add(resetButton);
         controls.add(newMazeButton);
         controls.add(new JLabel("Speed:"));
         speedSlider.setPreferredSize(new Dimension(120, speedSlider.getPreferredSize().height));
@@ -77,7 +77,7 @@ public class MazeSolverApp extends JFrame {
 
         newMazeButton.addActionListener(e -> generateNewMaze());
         startButton.addActionListener(e -> onPlayPause());
-        stopButton.addActionListener(e -> stopSolving());
+        resetButton.addActionListener(e -> resetSolving());
         speedSlider.addChangeListener(e -> applySpeed());
 
         JPanel wrapper = new JPanel(new BorderLayout());
@@ -124,7 +124,7 @@ public class MazeSolverApp extends JFrame {
                 g2.dispose();
             }
 
-            @Override public Dimension getPreferredSize() { return new Dimension(22, 22); }
+            @Override public Dimension getPreferredSize() { return new Dimension(28, 28); }
             @Override public Dimension getMinimumSize()   { return getPreferredSize(); }
             @Override public Dimension getMaximumSize()   { return getPreferredSize(); }
         };
@@ -138,7 +138,7 @@ public class MazeSolverApp extends JFrame {
         return btn;
     }
 
-    private static JButton createStopButton() {
+    private static JButton createResetButton() {
         JButton btn = new JButton() {
             @Override
             protected void paintComponent(Graphics g) {
@@ -146,33 +146,82 @@ public class MazeSolverApp extends JFrame {
                 g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
                                     RenderingHints.VALUE_ANTIALIAS_ON);
 
-                int size = Math.min(getWidth(), getHeight()) - 4;
+                int size = Math.min(getWidth(), getHeight()) - 3;
                 int x = (getWidth() - size) / 2;
                 int y = (getHeight() - size) / 2;
 
-                // filled circle
-                g2.setColor(getBackground());
+                // light-blue filled circle
+                Color blue = new Color(70, 140, 230);
+                g2.setColor(blue);
                 g2.fillOval(x, y, size, size);
-
-                // subtle outline
-                g2.setColor(getBackground().darker());
+                g2.setColor(blue.darker());
                 g2.setStroke(new BasicStroke(1.2f));
                 g2.drawOval(x, y, size, size);
+
+                // white circular-arrow (refresh) icon
+                g2.setColor(Color.WHITE);
+                g2.setStroke(new BasicStroke(3.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+
+                int pad = Math.max(3, size / 5);
+                int arc = size - 2 * pad;
+
+                // open arc (clockwise-ish)
+
+
+
+                // draw two arcs with arrowheads
+                for (int theta_deg : new int[] { 40, 220 }) {
+
+                    g2.drawArc(x + pad, y + pad, arc, arc, theta_deg - 120, 120);
+
+                    // ---- arrow-head (user geometry) ----
+                    double theta = Math.toRadians(theta_deg); // same angle used for the arc start
+                    int cx = x + size / 2;
+                    int cy = y + size / 2;
+                    int r = arc / 2; // radius of the arc
+                    int b = Math.max(4, size * 2 / 5); // base width of the arrowhead
+
+                    // local coordinates in the θ = 0 frame
+                    double[][] local = {
+                            { r, b / 2.0 }, // tip
+                            { r - b / 2.0, 0 }, // inner barb
+                            { r + b / 2.0, 0 } // outer barb
+                    };
+
+                    double cos = Math.cos(theta);
+                    double sin = Math.sin(theta);
+
+                    int[] xs = new int[3];
+                    int[] ys = new int[3];
+                    for (int i = 0; i < 3; i++) {
+                        double lx = local[i][0];
+                        double ly = local[i][1];
+                        // rotate
+                        double rx = lx * cos - ly * sin;
+                        double ry = lx * sin + ly * cos;
+                        // translate to circle centre + flip y for screen coordinates
+                        xs[i] = cx + (int) Math.round(rx);
+                        ys[i] = cy - (int) Math.round(ry);
+                    }
+
+                    g2.fillPolygon(xs, ys, 3);
+
+                }
 
                 g2.dispose();
             }
 
-            @Override public Dimension getPreferredSize() { return new Dimension(22, 22); }
+            @Override public Dimension getPreferredSize() { return new Dimension(28, 28); }
             @Override public Dimension getMinimumSize()   { return getPreferredSize(); }
             @Override public Dimension getMaximumSize()   { return getPreferredSize(); }
         };
 
-        btn.setToolTipText("Stop");
+        btn.setToolTipText("Reset");
         btn.setContentAreaFilled(false);
         btn.setBorderPainted(false);
         btn.setFocusPainted(false);
         btn.setOpaque(false);
-        btn.setBackground(Color.GRAY);
+        btn.setBackground(new Color(70, 140, 230));
         return btn;
     }
 
@@ -186,26 +235,23 @@ public class MazeSolverApp extends JFrame {
                 startButton.setEnabled(true);
                 startButton.putClientProperty("mode", "play");
                 explorerSelector.setEnabled(true);
-                stopButton.setEnabled(false);
-                stopButton.setBackground(Color.GRAY);
+                resetButton.setEnabled(false);
             }
             case RUNNING -> {
                 startButton.setEnabled(true);
                 startButton.putClientProperty("mode", "pause");
                 explorerSelector.setEnabled(false);
-                stopButton.setEnabled(true);
-                stopButton.setBackground(Color.RED);
+                resetButton.setEnabled(true);
             }
             case PAUSED -> {
                 startButton.setEnabled(true);
                 startButton.putClientProperty("mode", "play");
                 explorerSelector.setEnabled(false);
-                stopButton.setEnabled(true);
-                stopButton.setBackground(Color.RED);
+                resetButton.setEnabled(true);
             }
         }
         startButton.repaint();
-        stopButton.repaint();
+        resetButton.repaint();
     }
 
     private void applySpeed() {
@@ -263,12 +309,30 @@ public class MazeSolverApp extends JFrame {
         engine.start(explorer);
     }
 
-    private void stopSolving() {
-        if (engine != null) {
-            engine.stopCurrent();
-            statusLabel.setText("Stopped.");
-        }
-        setSolveState(SolveState.IDLE);
+    /** Restart from the beginning of the current maze.
+     *  - If currently running  → reset + immediately start solving again.
+     *  - If currently paused   → reset only (stay idle so the user can press ▶).
+     */
+    private void resetSolving() {
+	if (engine == null) return;
+
+	boolean wasRunning = engine.isRunning() && !engine.isPaused();
+
+	if (wasRunning) {
+	    // reset + auto-restart
+	    String name = (String) explorerSelector.getSelectedItem();
+	    java.util.function.Supplier<BaseExplorer> factory = EXPLORERS.get(name);
+	    if (factory == null) return;
+	    BaseExplorer explorer = factory.get();
+	    statusLabel.setText("Solving with: " + name);
+	    setSolveState(SolveState.RUNNING);
+	    engine.start(explorer);
+	} else {
+	    // paused (or any non-running case) → just rewind to start
+	    engine.resetToStart();
+	    statusLabel.setText("Reset to start.");
+	    setSolveState(SolveState.IDLE);
+	}
     }
 
     private void onGoalReached(int moveCount, int pathLength) {
