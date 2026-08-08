@@ -29,6 +29,8 @@ public class MazeEngine {
     private final Deque<Cell> pathStack = new ArrayDeque<>();
     private final AtomicInteger moveCount = new AtomicInteger(0);
     private volatile boolean gameOver = false;
+    private volatile boolean paused = false;
+    private final Object pauseLock = new Object();
     private volatile Thread solverThread;
     private GoalListener goalListener;
 
@@ -45,6 +47,28 @@ public class MazeEngine {
 
     public void setAnimationDurationMs(int ms) {
         panel.setAnimationDurationMs(ms);
+    }
+
+    /** Pause the current solve. No-op if nothing is running. */
+    public void pause() {
+        paused = true;
+    }
+
+    /** Resume a paused solve. */
+    public void resume() {
+        synchronized (pauseLock) {
+            paused = false;
+            pauseLock.notifyAll();
+        }
+    }
+
+    public boolean isPaused() {
+        return paused;
+    }
+
+    public boolean isRunning() {
+        Thread t = solverThread;
+        return t != null && t.isAlive() && !gameOver;
     }
 
     /**
@@ -71,6 +95,7 @@ public class MazeEngine {
         pathStack.push(maze.getStart());
         moveCount.set(0);
         gameOver = false;
+        paused = false;
         panel.resetSprite(maze.getStart());
         panel.repaint();
 
@@ -79,7 +104,7 @@ public class MazeEngine {
             try {
                 explorer.solve();
             } catch (MazeStoppedException ignored) {
-                // normal: the maze was reset while we were running
+                // normal: the maze was reset / stopped while we were running
             } catch (Exception ex) {
                 System.err.println("Explorer threw an exception:");
                 ex.printStackTrace();
@@ -87,6 +112,22 @@ public class MazeEngine {
         }, "MazeSolverThread");
         solverThread.setDaemon(true);
         solverThread.start();
+    }
+
+    private void waitIfPaused() {
+        synchronized (pauseLock) {
+            while (paused && !gameOver && !Thread.currentThread().isInterrupted()) {
+                try {
+                    pauseLock.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new MazeStoppedException();
+                }
+            }
+        }
+        if (gameOver || Thread.currentThread().isInterrupted()) {
+            throw new MazeStoppedException();
+        }
     }
 
     /**
@@ -105,6 +146,8 @@ public class MazeEngine {
         if (gameOver || Thread.currentThread().isInterrupted()) {
             throw new MazeStoppedException();
         }
+        waitIfPaused();
+
         // Tag this call with the thread that made it. If the maze gets reset
         // (a new solverThread installed) while our EDT callback is still
         // queued, the callback below detects the mismatch and no-ops instead
