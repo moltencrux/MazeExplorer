@@ -4,12 +4,21 @@ import javax.swing.JPanel;
 import javax.swing.Timer;
 import java.awt.*;
 import java.awt.geom.Ellipse2D;
+import java.awt.image.BufferedImage;
 import java.util.Deque;
 import java.util.concurrent.CountDownLatch;
 
 /**
  * Renders the maze grid, the visited trail, and a smoothly-animated sprite
  * for the explorer's current position.
+ *
+ * Performance notes (dev/core):
+ *  - Static maze (walls, gridlines, start/goal) is cached in a BufferedImage
+ *    and only rebuilt when the maze itself changes.
+ *  - Trail is cached in a second BufferedImage and only rebuilt when the
+ *    path stack length changes (i.e. after a real move or back-track).
+ *  - Animation step count scales with the requested duration and collapses
+ *    to an instant snap when the duration is very short.
  */
 public class MazePanel extends JPanel {
 
@@ -20,12 +29,14 @@ public class MazePanel extends JPanel {
     private int cellSize = 22;
 
     // Static maze background (walls/open cells, gridlines, start/goal
-    // markers) rendered once per maze and reused every frame -- redrawing
-    // ~1000+ cells from scratch on every animation tick was the real
-    // bottleneck, independent of the timer delay.
-    private java.awt.image.BufferedImage backgroundCache;
+    // markers) rendered once per maze and reused every frame.
+    private BufferedImage backgroundCache;
 
-    // Sprite's current draw position, in pixels (panel-local, top-left of grid).
+    // Trail markers. Rebuilt only when pathStack.size() changes.
+    private BufferedImage trailCache;
+    private int trailCachePathSize = -1;
+
+    // Sprite's current draw position, in pixels (panel-local).
     private double spriteX, spriteY;
     private Cell spriteCell;
 
@@ -37,6 +48,7 @@ public class MazePanel extends JPanel {
         this.maze = maze;
         this.pathStack = pathStack;
         rebuildBackgroundCache();
+        invalidateTrailCache();
         resetSprite(startCell);
         updatePreferredSize();
     }
@@ -44,7 +56,7 @@ public class MazePanel extends JPanel {
     private void rebuildBackgroundCache() {
         int w = maze.getCols() * cellSize + 1;
         int h = maze.getRows() * cellSize + 1;
-        backgroundCache = new java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        backgroundCache = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = backgroundCache.createGraphics();
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
@@ -69,11 +81,44 @@ public class MazePanel extends JPanel {
         g.dispose();
     }
 
+    /** Mark the trail cache as stale so the next paint rebuilds it. */
+    void invalidateTrailCache() {
+        trailCache = null;
+        trailCachePathSize = -1;
+    }
+
+    /** Rebuild the trail image only when the path length has changed. */
+    private void ensureTrailCache() {
+        if (pathStack == null) return;
+        int size = pathStack.size();
+        if (trailCache != null && trailCachePathSize == size) return;
+
+        int w = maze.getCols() * cellSize + 1;
+        int h = maze.getRows() * cellSize + 1;
+        trailCache = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = trailCache.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setColor(new Color(0x9FD8FF));
+
+        int idx = 0;
+        for (Cell c : pathStack) {
+            if (idx > 0) {   // skip the head (current sprite cell)
+                int pad = 4;
+                g.fillRoundRect(c.col * cellSize + pad, c.row * cellSize + pad,
+                        cellSize - 2 * pad, cellSize - 2 * pad, 6, 6);
+            }
+            idx++;
+        }
+        g.dispose();
+        trailCachePathSize = size;
+    }
+
     void resetSprite(Cell cell) {
         this.spriteCell = cell;
         Point2D p = cellCenter(cell);
         this.spriteX = p.x;
         this.spriteY = p.y;
+        invalidateTrailCache();
         repaint();
     }
 
@@ -90,7 +135,8 @@ public class MazePanel extends JPanel {
     }
 
     private Point2D cellCenter(Cell c) {
-        return new Point2D(c.col * cellSize + cellSize / 2.0, c.row * cellSize + cellSize / 2.0);
+        return new Point2D(c.col * cellSize + cellSize / 2.0,
+                           c.row * cellSize + cellSize / 2.0);
     }
 
     /** Animate a smooth slide from one cell to an adjacent, open cell. */
@@ -100,7 +146,6 @@ public class MazePanel extends JPanel {
 
         int steps = stepsForDuration();
         if (steps <= 1) {
-            // Fast enough that a multi-frame slide isn't worth the repaint cost.
             spriteX = toPx.x;
             spriteY = toPx.y;
             repaint();
@@ -145,7 +190,7 @@ public class MazePanel extends JPanel {
         double targetX = center.x + dir.dCol * nudge;
         double targetY = center.y + dir.dRow * nudge;
 
-        int totalSteps = Math.max(2, steps / 2); // out and back
+        int totalSteps = Math.max(2, steps / 2);
         int perStepDelay = Math.max(1, externalAnimationDurationMs / totalSteps / 2);
         Timer[] timerHolder = new Timer[1];
         int[] step = {0};
@@ -178,14 +223,11 @@ public class MazePanel extends JPanel {
     /**
      * How many discrete animation frames a move gets, scaled down as the
      * requested duration shrinks. At very low durations this collapses to 1
-     * (i.e. an instant snap, no Timer/repaint overhead at all), which is
-     * what actually lets the "fast" end of the speed slider feel fast --
-     * previously every move did a fixed 20 timer-fire+repaint cycles no
-     * matter how small the requested delay was.
+     * (instant snap, no Timer overhead).
      */
     private int stepsForDuration() {
         if (externalAnimationDurationMs <= 4) return 1;
-        int steps = externalAnimationDurationMs / 4; // ~1 frame per 4ms
+        int steps = externalAnimationDurationMs / 4;
         return Math.max(1, Math.min(MAX_ANIMATION_STEPS, steps));
     }
 
@@ -200,27 +242,20 @@ public class MazePanel extends JPanel {
         Graphics2D g = (Graphics2D) g0;
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-        // Static grid/walls/gridlines/markers -- drawn once per maze, blitted every frame.
+        // Static grid / walls / markers
         g.drawImage(backgroundCache, 0, 0, null);
 
-        // Trail: every cell in the current path except the one the sprite is on
-        if (pathStack != null) {
-            g.setColor(new Color(0x9FD8FF));
-            int idx = 0;
-            for (Cell c : pathStack) {
-                if (idx > 0) { // skip the head (current sprite cell)
-                    int pad = 4;
-                    g.fillRoundRect(c.col * cellSize + pad, c.row * cellSize + pad,
-                            cellSize - 2 * pad, cellSize - 2 * pad, 6, 6);
-                }
-                idx++;
-            }
+        // Trail (cached; only rebuilt when path length changes)
+        ensureTrailCache();
+        if (trailCache != null) {
+            g.drawImage(trailCache, 0, 0, null);
         }
 
         // Sprite
         double radius = cellSize * 0.32;
         g.setColor(new Color(0xE53935));
-        Ellipse2D dot = new Ellipse2D.Double(spriteX - radius, spriteY - radius, radius * 2, radius * 2);
+        Ellipse2D dot = new Ellipse2D.Double(spriteX - radius, spriteY - radius,
+                                             radius * 2, radius * 2);
         g.fill(dot);
         g.setColor(Color.WHITE);
         g.setStroke(new BasicStroke(2f));

@@ -195,6 +195,7 @@ public class MazeEngine {
             } else {
                 pathStack.push(target);
             }
+            panel.invalidateTrailCache();
             panel.animateMove(current, target, latch);
         });
         await(latch);
