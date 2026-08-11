@@ -85,3 +85,18 @@ a rapid maze-reset stress case both complete without deadlocking. To run it:
 javac -d out $(find src tests -name "*.java")
 java -cp out mazegame.SmokeTest
 ```
+
+## Running in VSCode
+Altneratively in VSCode, you can add the following item to your `launch.json` configurations to launch the app:
+
+```json
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "java",
+            "name": "Launch MazeSolverApp",
+            "request": "launch",
+            "mainClass": "mazegame.MazeSolverApp"
+        }
+    ]
+```
