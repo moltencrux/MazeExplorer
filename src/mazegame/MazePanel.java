@@ -12,9 +12,13 @@ import java.util.concurrent.CountDownLatch;
  * Renders the maze grid, the visited trail, and a smoothly-animated sprite
  * for the explorer's current position.
  *
- * Performance notes (dev/core):
- *  - Static maze (walls, gridlines, start/goal) is cached in a BufferedImage
- *    and only rebuilt when the maze itself changes.
+ * Cells on even indices (the "graph lines") are drawn thin (walls / openings);
+ * cells on odd indices (the logical rooms) are drawn thicker. This reclaims
+ * screen real estate that was previously consumed by 1-block-thick walls.
+ *
+ * Performance notes:
+ *  - Static maze (walls, start/goal) is cached in a BufferedImage and only
+ *    rebuilt when the maze itself changes.
  *  - Trail is cached in a second BufferedImage and only rebuilt when the
  *    path stack length changes (i.e. after a real move or back-track).
  *  - Animation step count scales with the requested duration and collapses
@@ -24,12 +28,25 @@ public class MazePanel extends JPanel {
 
     private static final int MAX_ANIMATION_STEPS = 20;
 
+    /** Pixel size of logical room cells (odd row/col indices). */
+    private static final int ROOM_SIZE = 26;
+
+    /** Pixel thickness of wall/opening cells (even row/col indices). */
+    private static final int WALL_THICKNESS = 4;
+
     private Maze maze;
     private Deque<Cell> pathStack;
-    private int cellSize = 22;
 
-    // Static maze background (walls/open cells, gridlines, start/goal
-    // markers) rendered once per maze and reused every frame.
+    // Cumulative pixel offsets: colX[c] = left edge of column c,
+    // rowY[r] = top edge of row r. Length = cols+1 / rows+1 so the
+    // final entry is the total width / height.
+    private int[] colX;
+    private int[] rowY;
+    private int totalWidth;
+    private int totalHeight;
+
+    // Static maze background (walls/open cells, start/goal markers)
+    // rendered once per maze and reused every frame.
     private BufferedImage backgroundCache;
 
     // Trail markers. Rebuilt only when pathStack.size() changes.
@@ -47,37 +64,64 @@ public class MazePanel extends JPanel {
     void setEngineState(Maze maze, Deque<Cell> pathStack, Cell startCell) {
         this.maze = maze;
         this.pathStack = pathStack;
+        rebuildGeometry();
         rebuildBackgroundCache();
         invalidateTrailCache();
         resetSprite(startCell);
         updatePreferredSize();
     }
 
+    /**
+     * Precompute the variable-pitch layout: even indices get WALL_THICKNESS,
+     * odd indices get ROOM_SIZE.
+     */
+    private void rebuildGeometry() {
+        int cols = maze.getCols();
+        int rows = maze.getRows();
+
+        colX = new int[cols + 1];
+        rowY = new int[rows + 1];
+
+        colX[0] = 0;
+        for (int c = 0; c < cols; c++) {
+            int w = (c % 2 == 0) ? WALL_THICKNESS : ROOM_SIZE;
+            colX[c + 1] = colX[c] + w;
+        }
+        totalWidth = colX[cols];
+
+        rowY[0] = 0;
+        for (int r = 0; r < rows; r++) {
+            int h = (r % 2 == 0) ? WALL_THICKNESS : ROOM_SIZE;
+            rowY[r + 1] = rowY[r] + h;
+        }
+        totalHeight = rowY[rows];
+    }
+
+    private int cellWidth(int col) {
+        return colX[col + 1] - colX[col];
+    }
+
+    private int cellHeight(int row) {
+        return rowY[row + 1] - rowY[row];
+    }
+
     private void rebuildBackgroundCache() {
-        int w = maze.getCols() * cellSize + 1;
-        int h = maze.getRows() * cellSize + 1;
-        backgroundCache = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        backgroundCache = new BufferedImage(totalWidth, totalHeight, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = backgroundCache.createGraphics();
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
         for (int r = 0; r < maze.getRows(); r++) {
             for (int c = 0; c < maze.getCols(); c++) {
                 boolean open = maze.isOpen(r, c);
-                g.setColor(open ? Color.WHITE : new Color(0x2B2B3A));
-                g.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
+                g.setColor(open ? Color.BLACK : new Color(0x00FFFF));
+                g.fillRect(colX[c], rowY[r], cellWidth(c), cellHeight(r));
             }
         }
 
         drawMarker(g, maze.getStart(), new Color(0x4CAF50), "S");
         drawMarker(g, maze.getGoal(), new Color(0xFFB300), "G");
 
-        g.setColor(new Color(0, 0, 0, 25));
-        for (int r = 0; r <= maze.getRows(); r++) {
-            g.drawLine(0, r * cellSize, maze.getCols() * cellSize, r * cellSize);
-        }
-        for (int c = 0; c <= maze.getCols(); c++) {
-            g.drawLine(c * cellSize, 0, c * cellSize, maze.getRows() * cellSize);
-        }
+        // No extra gridlines — the thin walls already define the structure.
         g.dispose();
     }
 
@@ -93,9 +137,7 @@ public class MazePanel extends JPanel {
         int size = pathStack.size();
         if (trailCache != null && trailCachePathSize == size) return;
 
-        int w = maze.getCols() * cellSize + 1;
-        int h = maze.getRows() * cellSize + 1;
-        trailCache = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        trailCache = new BufferedImage(totalWidth, totalHeight, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = trailCache.createGraphics();
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         g.setColor(new Color(0x9FD8FF));
@@ -103,9 +145,14 @@ public class MazePanel extends JPanel {
         int idx = 0;
         for (Cell c : pathStack) {
             if (idx > 0) {   // skip the head (current sprite cell)
-                int pad = 4;
-                g.fillRoundRect(c.col * cellSize + pad, c.row * cellSize + pad,
-                        cellSize - 2 * pad, cellSize - 2 * pad, 6, 6);
+                // Trail only appears on room cells (odd indices); pad relative to room size.
+                int pad = Math.max(2, ROOM_SIZE / 6);
+                g.fillRoundRect(
+                        colX[c.col] + pad,
+                        rowY[c.row] + pad,
+                        cellWidth(c.col) - 2 * pad,
+                        cellHeight(c.row) - 2 * pad,
+                        6, 6);
             }
             idx++;
         }
@@ -123,9 +170,7 @@ public class MazePanel extends JPanel {
     }
 
     private void updatePreferredSize() {
-        int w = maze.getCols() * cellSize + 1;
-        int h = maze.getRows() * cellSize + 1;
-        setPreferredSize(new Dimension(w, h));
+        setPreferredSize(new Dimension(totalWidth, totalHeight));
         revalidate();
     }
 
@@ -135,8 +180,9 @@ public class MazePanel extends JPanel {
     }
 
     private Point2D cellCenter(Cell c) {
-        return new Point2D(c.col * cellSize + cellSize / 2.0,
-                           c.row * cellSize + cellSize / 2.0);
+        return new Point2D(
+                colX[c.col] + cellWidth(c.col) / 2.0,
+                rowY[c.row] + cellHeight(c.row) / 2.0);
     }
 
     /** Animate a smooth slide from one cell to an adjacent, open cell. */
@@ -186,7 +232,8 @@ public class MazePanel extends JPanel {
         }
 
         Point2D center = cellCenter(at);
-        double nudge = cellSize * 0.28;
+        // Nudge by a fraction of the room size so it still feels proportional.
+        double nudge = ROOM_SIZE * 0.28;
         double targetX = center.x + dir.dCol * nudge;
         double targetY = center.y + dir.dRow * nudge;
 
@@ -251,8 +298,8 @@ public class MazePanel extends JPanel {
             g.drawImage(trailCache, 0, 0, null);
         }
 
-        // Sprite
-        double radius = cellSize * 0.32;
+        // Sprite — sized relative to room cells
+        double radius = ROOM_SIZE * 0.32;
         g.setColor(new Color(0xE53935));
         Ellipse2D dot = new Ellipse2D.Double(spriteX - radius, spriteY - radius,
                                              radius * 2, radius * 2);
@@ -263,15 +310,18 @@ public class MazePanel extends JPanel {
     }
 
     private void drawMarker(Graphics2D g, Cell c, Color color, String label) {
-        int pad = 3;
+        int pad = Math.max(2, ROOM_SIZE / 8);
+        int x = colX[c.col] + pad;
+        int y = rowY[c.row] + pad;
+        int w = cellWidth(c.col) - 2 * pad;
+        int h = cellHeight(c.row) - 2 * pad;
         g.setColor(color);
-        g.fillRoundRect(c.col * cellSize + pad, c.row * cellSize + pad,
-                cellSize - 2 * pad, cellSize - 2 * pad, 6, 6);
+        g.fillRoundRect(x, y, w, h, 6, 6);
         g.setColor(Color.WHITE);
-        g.setFont(getFont().deriveFont(Font.BOLD, cellSize * 0.5f));
+        g.setFont(getFont().deriveFont(Font.BOLD, ROOM_SIZE * 0.5f));
         FontMetrics fm = g.getFontMetrics();
-        int tx = c.col * cellSize + (cellSize - fm.stringWidth(label)) / 2;
-        int ty = c.row * cellSize + (cellSize + fm.getAscent()) / 2 - 2;
+        int tx = colX[c.col] + (cellWidth(c.col) - fm.stringWidth(label)) / 2;
+        int ty = rowY[c.row] + (cellHeight(c.row) + fm.getAscent()) / 2 - 2;
         g.drawString(label, tx, ty);
     }
 }
