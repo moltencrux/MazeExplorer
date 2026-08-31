@@ -1,8 +1,7 @@
 package mazegame;
 
 import javax.swing.SwingUtilities;
-import java.util.ArrayDeque;
-import java.util.Deque;
+import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -10,13 +9,15 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Wires together the Maze (data), the BaseExplorer (student algorithm,
  * running on its own thread) and the MazePanel (Swing rendering, on the EDT).
  *
- * Threading model: all mutable state (the current path stack, the
- * game-over flag) is only ever mutated on the Swing Event Dispatch Thread.
- * The explorer's solve() method runs on a dedicated worker thread and calls
- * into attemptMove(), which posts work to the EDT and then blocks on a
- * CountDownLatch until the animation + state mutation is complete. The
- * latch's await()/countDown() pair guarantees the worker thread sees the
- * EDT's writes once it wakes up, so no extra synchronization is needed.
+ * Threading model: all mutable path / game-over state is only ever mutated
+ * on the Swing Event Dispatch Thread. The explorer's solve() method runs on
+ * a dedicated worker thread and calls into attemptMove(), which posts work
+ * to the EDT and then blocks on a CountDownLatch until the animation + state
+ * mutation is complete.
+ *
+ * Additionally tracks a visited set and open frontier so the soft-follow
+ * camera can frame the active search front, and supports markExplored /
+ * teleport for advanced explorers.
  */
 public class MazeEngine {
 
@@ -27,6 +28,10 @@ public class MazeEngine {
     private final Maze maze;
     private final MazePanel panel;
     private final Deque<Cell> pathStack = new ArrayDeque<>();
+    /** Every cell the explorer has successfully stepped onto (or started on). */
+    private final Set<Cell> visited = new HashSet<>();
+    /** Visited cells that still have at least one unvisited open neighbor. */
+    private final Set<Cell> visitedOpen = new HashSet<>();
     private final AtomicInteger moveCount = new AtomicInteger(0);
     private volatile boolean gameOver = false;
     private volatile boolean paused = false;
@@ -38,7 +43,10 @@ public class MazeEngine {
         this.maze = maze;
         this.panel = panel;
         pathStack.push(maze.getStart());
+        visited.add(maze.getStart());
+        visitedOpen.add(maze.getStart());
         panel.setEngineState(maze, pathStack, maze.getStart());
+        recomputeFrontier();
     }
 
     public void setGoalListener(GoalListener listener) {
@@ -49,12 +57,14 @@ public class MazeEngine {
         panel.setAnimationDurationMs(ms);
     }
 
-    /** Pause the current solve. No-op if nothing is running. */
+    public void setCameraOmegaScale(double scale) {
+        panel.setCameraOmegaScale(scale);
+    }
+
     public void pause() {
         paused = true;
     }
 
-    /** Resume a paused solve. */
     public void resume() {
         synchronized (pauseLock) {
             paused = false;
@@ -71,55 +81,54 @@ public class MazeEngine {
         return t != null && t.isAlive() && !gameOver;
     }
 
-    /**
-     * Stops any currently running explorer thread (if any) by interrupting it,
-     * so a new run can start cleanly.
-     */
     public void stopCurrent() {
         gameOver = true;
         Thread t = solverThread;
         if (t != null && t.isAlive()) {
             t.interrupt();
         }
+        synchronized (pauseLock) {
+            paused = false;
+            pauseLock.notifyAll();
+        }
     }
 
-    /**
-     * Clears the path, move counter and sprite back to the maze entrance.
-     * Does <em>not</em> start a solver thread. Any running/paused solver is stopped.
-     */
     public void resetToStart() {
-	stopCurrent();
-	try {
-	    if (solverThread != null) solverThread.join(200);
-	} catch (InterruptedException ignored) {
-	}
+        stopCurrent();
+        try {
+            if (solverThread != null) solverThread.join(200);
+        } catch (InterruptedException ignored) {
+        }
 
-	pathStack.clear();
-	pathStack.push(maze.getStart());
-	moveCount.set(0);
-	gameOver = false;
-	paused = false;
-	panel.resetSprite(maze.getStart());
-	panel.repaint();
+        pathStack.clear();
+        pathStack.push(maze.getStart());
+        visited.clear();
+        visited.add(maze.getStart());
+        visitedOpen.clear();
+        visitedOpen.add(maze.getStart());
+        moveCount.set(0);
+        gameOver = false;
+        paused = false;
+        panel.setEngineState(maze, pathStack, maze.getStart());
+        recomputeFrontier();
+        panel.repaint();
     }
 
-    /** Starts a fresh run of the given explorer instance on a background thread. */
     public void start(BaseExplorer explorer) {
-	resetToStart();                 // stop + clear state
-
-	explorer.bind(this);
-	solverThread = new Thread(() -> {
-	    try {
-		explorer.solve();
-	    } catch (MazeStoppedException ignored) {
-		// normal: the maze was reset / stopped while we were running
-	    } catch (Exception ex) {
-		System.err.println("Explorer threw an exception:");
-		ex.printStackTrace();
-	    }
-	}, "MazeSolverThread");
-	solverThread.setDaemon(true);
-	solverThread.start();
+        resetToStart();
+        explorer.bind(this);
+        solverThread = new Thread(() -> {
+            try {
+                explorer.solve();
+            } catch (MazeStoppedException ignored) {
+                // normal: the maze was reset / stopped while we were running
+            } catch (Exception ex) {
+                System.err.println("Explorer threw an exception:");
+                ex.printStackTrace();
+            }
+        }, "MazeSolverThread");
+        solverThread.setDaemon(true);
+        solverThread.start();
     }
 
     private void waitIfPaused() {
@@ -138,15 +147,40 @@ public class MazeEngine {
         }
     }
 
-    /**
-     * Returns true if a move in the given direction would succeed, without
-     * performing it. Safe to call from the solver thread; has no side effects
-     * (no animation, no path change, no move count increment).
-     */
     boolean canMove(Direction dir) {
         Cell current = pathStack.peek();
         Cell target = current.moved(dir);
         return maze.isOpen(target);
+    }
+
+    boolean hasVisited(Cell cell) {
+        return visited.contains(cell);
+    }
+
+    /**
+     * Open leaves = visited cells that still have an unvisited open neighbor.
+     * Derived from the maze + visited set so explorers never manage a frontier.
+     */
+    private void recomputeFrontier() {
+        List<Cell> frontier = new ArrayList<>();
+        Set<Cell> deadEnds = new HashSet<>();
+        for (Cell cell : visitedOpen) {
+            boolean hasOpenNeighbor = false;
+            for (Direction d : Direction.values()) {
+                Cell neighbor = cell.moved(d);
+                if (maze.isOpen(neighbor) && !visited.contains(neighbor)) {
+                    hasOpenNeighbor = true;
+                    break;
+                }
+            }
+            if (hasOpenNeighbor) {
+                frontier.add(cell);
+            } else {
+                deadEnds.add(cell);
+            }
+        }
+        visitedOpen.removeAll(deadEnds);
+        panel.setFrontier(frontier);
     }
 
     /** Called by BaseExplorer. Runs on the solver thread; blocks until the animation completes. */
@@ -156,10 +190,6 @@ public class MazeEngine {
         }
         waitIfPaused();
 
-        // Tag this call with the thread that made it. If the maze gets reset
-        // (a new solverThread installed) while our EDT callback is still
-        // queued, the callback below detects the mismatch and no-ops instead
-        // of mutating state that no longer belongs to this run.
         final Thread myThread = Thread.currentThread();
         moveCount.incrementAndGet();
 
@@ -179,8 +209,6 @@ public class MazeEngine {
             return false;
         }
 
-        // "Backing up" = moving onto the cell immediately behind us in the
-        // current path. That cell's trail mark disappears once we leave it.
         Cell previous = secondFromTop();
         boolean backingUp = previous != null && previous.equals(target);
 
@@ -195,6 +223,10 @@ public class MazeEngine {
             } else {
                 pathStack.push(target);
             }
+            visited.add(target);
+            visitedOpen.add(target);
+            recomputeFrontier();
+            panel.markExplored(target);
             panel.invalidateTrailCache();
             panel.animateMove(current, target, latch);
         });
@@ -207,9 +239,60 @@ public class MazeEngine {
             SwingUtilities.invokeLater(() -> {
                 if (goalListener != null) goalListener.onGoalReached(finalMoves, pathLen);
             });
-            // Let the algorithm's solve() return naturally; further moves are blocked.
         }
         return true;
+    }
+
+    /**
+     * Instantly move the sprite to a previously visited cell.
+     * Returns true on success, false if the cell has never been visited
+     * (or is the current cell - treated as a no-op success).
+     */
+    boolean attemptTeleport(Cell cell) {
+        if (gameOver || Thread.currentThread().isInterrupted()) {
+            throw new MazeStoppedException();
+        }
+        waitIfPaused();
+
+        Cell current = pathStack.peek();
+        if (cell.equals(current)) return true;
+        if (!visited.contains(cell)) return false;
+
+        final Thread myThread = Thread.currentThread();
+        CountDownLatch latch = new CountDownLatch(1);
+        SwingUtilities.invokeLater(() -> {
+            if (solverThread != myThread) {
+                latch.countDown();
+                return;
+            }
+            pathStack.clear();
+            pathStack.push(cell);
+            panel.invalidateTrailCache();
+            panel.animateHop(current, cell, latch);
+        });
+        await(latch);
+
+        if (cell.equals(maze.getGoal())) {
+            gameOver = true;
+            int finalMoves = moveCount.get();
+            int pathLen = pathStack.size();
+            SwingUtilities.invokeLater(() -> {
+                if (goalListener != null) goalListener.onGoalReached(finalMoves, pathLen);
+            });
+        }
+        return true;
+    }
+
+    void markExplored(Cell cell) {
+        panel.markExplored(cell);
+    }
+
+    void markExploredMany(List<Cell> cells) {
+        panel.markExploredMany(cells);
+    }
+
+    void setShowSprite(boolean show) {
+        panel.setShowSprite(show);
     }
 
     private Cell secondFromTop() {
@@ -229,7 +312,6 @@ public class MazeEngine {
             throw new MazeStoppedException();
         }
         if (gameOver && !pathStack.peek().equals(maze.getGoal())) {
-            // Game was reset out from under us mid-animation.
             throw new MazeStoppedException();
         }
     }

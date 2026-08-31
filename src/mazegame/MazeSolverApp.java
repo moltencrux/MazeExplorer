@@ -5,6 +5,8 @@ import mazegame.explorers.WallFollowerExplorer;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -12,6 +14,10 @@ import java.util.Map;
  * The runnable entry point. Builds the window, wires up the maze / engine /
  * panel, and provides simple controls for generating a new maze, picking an
  * Explorer strategy, running / pausing / resetting it, and adjusting animation speed.
+ *
+ * Supports large mazes with a soft-follow camera, exploration overlay, and
+ * manual pan/zoom (drag + mouse wheel). Press C to clear pan, F for overview,
+ * D for debug camera box.
  *
  * ------------------------------------------------------------------------
  * STUDENTS: to add your own strategy, subclass BaseExplorer (see
@@ -32,8 +38,9 @@ public class MazeSolverApp extends JFrame {
         // EXPLORERS.put("My DFS Explorer", MyDfsExplorer::new);
     }
 
-    private static final int DEFAULT_CELLS_WIDE = 18;
-    private static final int DEFAULT_CELLS_HIGH = 14;
+    // Larger default so the camera / exploration overlay has room to work.
+    private static final int DEFAULT_CELLS_WIDE = 72;
+    private static final int DEFAULT_CELLS_HIGH = 54;
 
     private final MazePanel panel = new MazePanel();
     private Maze maze;
@@ -53,14 +60,40 @@ public class MazeSolverApp extends JFrame {
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
 
-        JScrollPane scrollPane = new JScrollPane(panel);
-        add(scrollPane, BorderLayout.CENTER);
+        // Fixed viewport - camera handles mazes larger than the window.
+        // No JScrollPane; the panel paints only the visible camera region.
+        add(panel, BorderLayout.CENTER);
         add(buildControls(), BorderLayout.SOUTH);
+
+        // Keyboard shortcuts
+        panel.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyPressed(KeyEvent e) {
+                switch (e.getKeyCode()) {
+                    case KeyEvent.VK_C -> {
+                        panel.resetPan();
+                        statusLabel.setText("Pan cleared - auto-follow resumed.");
+                    }
+                    case KeyEvent.VK_F -> {
+                        boolean on = panel.toggleOverview();
+                        statusLabel.setText(on ? "Overview mode (full maze)." : "Frontier follow resumed.");
+                    }
+                    case KeyEvent.VK_D -> {
+                        boolean on = panel.toggleDebugCamera();
+                        statusLabel.setText(on ? "Debug camera box ON." : "Debug camera box OFF.");
+                    }
+                    case KeyEvent.VK_SPACE -> onPlayPause();
+                    case KeyEvent.VK_N -> generateNewMaze();
+                    case KeyEvent.VK_ESCAPE -> dispose();
+                }
+            }
+        });
 
         generateNewMaze();
 
-        pack();
+        setSize(1064, 800);
         setLocationRelativeTo(null);
+        setMinimumSize(new Dimension(640, 480));
     }
 
     private JComponent buildControls() {
@@ -108,7 +141,6 @@ public class MazeSolverApp extends JFrame {
                 g2.setColor(isPause ? new Color(40, 40, 40) : new Color(0, 160, 0));
 
                 if (isPause) {
-                    // || bars
                     int barW = size / 4;
                     int gap  = size / 6;
                     int total = barW * 2 + gap;
@@ -116,7 +148,6 @@ public class MazeSolverApp extends JFrame {
                     g2.fillRoundRect(left, y, barW, size, 2, 2);
                     g2.fillRoundRect(left + barW + gap, y, barW, size, 2, 2);
                 } else {
-                    // ▶ triangle
                     int[] xs = { x, x, x + size };
                     int[] ys = { y, y + size, y + size / 2 };
                     g2.fillPolygon(xs, ys, 3);
@@ -150,7 +181,6 @@ public class MazeSolverApp extends JFrame {
                 int x = (getWidth() - size) / 2;
                 int y = (getHeight() - size) / 2;
 
-                // light-blue filled circle
                 Color blue = new Color(70, 140, 230);
                 g2.setColor(blue);
                 g2.fillOval(x, y, size, size);
@@ -158,34 +188,25 @@ public class MazeSolverApp extends JFrame {
                 g2.setStroke(new BasicStroke(1.2f));
                 g2.drawOval(x, y, size, size);
 
-                // white circular-arrow (refresh) icon
                 g2.setColor(Color.WHITE);
                 g2.setStroke(new BasicStroke(3.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
 
                 int pad = Math.max(3, size / 5);
                 int arc = size - 2 * pad;
 
-                // open arc (clockwise-ish)
-
-
-
-                // draw two arcs with arrowheads
                 for (int theta_deg : new int[] { 40, 220 }) {
-
                     g2.drawArc(x + pad, y + pad, arc, arc, theta_deg - 120, 120);
 
-                    // ---- arrow-head (user geometry) ----
-                    double theta = Math.toRadians(theta_deg); // same angle used for the arc start
+                    double theta = Math.toRadians(theta_deg);
                     int cx = x + size / 2;
                     int cy = y + size / 2;
-                    int r = arc / 2; // radius of the arc
-                    int b = Math.max(4, size * 2 / 5); // base width of the arrowhead
+                    int r = arc / 2;
+                    int b = Math.max(4, size * 2 / 5);
 
-                    // local coordinates in the θ = 0 frame
                     double[][] local = {
-                            { r, b / 2.0 }, // tip
-                            { r - b / 2.0, 0 }, // inner barb
-                            { r + b / 2.0, 0 } // outer barb
+                            { r, b / 2.0 },
+                            { r - b / 2.0, 0 },
+                            { r + b / 2.0, 0 }
                     };
 
                     double cos = Math.cos(theta);
@@ -196,16 +217,12 @@ public class MazeSolverApp extends JFrame {
                     for (int i = 0; i < 3; i++) {
                         double lx = local[i][0];
                         double ly = local[i][1];
-                        // rotate
                         double rx = lx * cos - ly * sin;
                         double ry = lx * sin + ly * cos;
-                        // translate to circle centre + flip y for screen coordinates
                         xs[i] = cx + (int) Math.round(rx);
                         ys[i] = cy - (int) Math.round(ry);
                     }
-
                     g2.fillPolygon(xs, ys, 3);
-
                 }
 
                 g2.dispose();
@@ -255,12 +272,18 @@ public class MazeSolverApp extends JFrame {
     }
 
     private void applySpeed() {
-        // Slider is 1 (slowest) .. 100 (fastest). Map to an animation
-        // duration in ms, higher slider value = shorter duration.
+        // Slider is 1 (slowest) .. 100 (fastest).
         int value = speedSlider.getValue();
-        int durationMs = (int) Math.round(100 * ((100 - value) / 100.0)); // ~600ms .. 0ms
+        double t = (value - 1) / 99.0; // 0 .. 1
+
+        // Animation duration: ~600ms at left -> ~0ms at right
+        int durationMs = (int) Math.round(100 * ((100 - value) / 100.0));
+        // Camera spring stiffness scales up slightly at the high end
+        double omegaScale = 0.7 + 0.9 * t; // 0.7 .. 1.6
+
         if (engine != null) {
             engine.setAnimationDurationMs(durationMs);
+            engine.setCameraOmegaScale(omegaScale);
         }
     }
 
@@ -272,25 +295,25 @@ public class MazeSolverApp extends JFrame {
         engine = new MazeEngine(maze, panel);
         engine.setGoalListener(this::onGoalReached);
         applySpeed();
-        statusLabel.setText(" ");
+        statusLabel.setText("New maze ready.  (drag/wheel pan·zoom, C clear pan, F overview, D debug)");
         setSolveState(SolveState.IDLE);
+        panel.resetPan();
         panel.revalidate();
         panel.repaint();
-        SwingUtilities.invokeLater(this::pack);
+        panel.requestFocusInWindow();
     }
 
     private void onPlayPause() {
         if (engine == null) return;
 
         if (!engine.isRunning()) {
-            // idle → start a new solve
             startSolving();
         } else if (engine.isPaused()) {
             engine.resume();
             setSolveState(SolveState.RUNNING);
             String current = statusLabel.getText();
             if (current.startsWith("Paused")) {
-                statusLabel.setText(current.replace("Paused.", "Solving…"));
+                statusLabel.setText(current.replace("Paused.", "Solving..."));
             }
         } else {
             engine.pause();
@@ -307,32 +330,34 @@ public class MazeSolverApp extends JFrame {
         statusLabel.setText("Solving with: " + name);
         setSolveState(SolveState.RUNNING);
         engine.start(explorer);
+        panel.requestFocusInWindow();
     }
 
-    /** Restart from the beginning of the current maze.
-     *  - If currently running  → reset + immediately start solving again.
-     *  - If currently paused   → reset only (stay idle so the user can press ▶).
+    /**
+     * Restart from the beginning of the current maze.
+     *  - If currently running  -> reset + immediately start solving again.
+     *  - If currently paused   -> reset only (stay idle so the user can press ▶).
      */
     private void resetSolving() {
-	if (engine == null) return;
+        if (engine == null) return;
 
-	boolean wasRunning = engine.isRunning() && !engine.isPaused();
+        boolean wasRunning = engine.isRunning() && !engine.isPaused();
 
-	if (wasRunning) {
-	    // reset + auto-restart
-	    String name = (String) explorerSelector.getSelectedItem();
-	    java.util.function.Supplier<BaseExplorer> factory = EXPLORERS.get(name);
-	    if (factory == null) return;
-	    BaseExplorer explorer = factory.get();
-	    statusLabel.setText("Solving with: " + name);
-	    setSolveState(SolveState.RUNNING);
-	    engine.start(explorer);
-	} else {
-	    // paused (or any non-running case) → just rewind to start
-	    engine.resetToStart();
-	    statusLabel.setText("Reset to start.");
-	    setSolveState(SolveState.IDLE);
-	}
+        if (wasRunning) {
+            String name = (String) explorerSelector.getSelectedItem();
+            java.util.function.Supplier<BaseExplorer> factory = EXPLORERS.get(name);
+            if (factory == null) return;
+            BaseExplorer explorer = factory.get();
+            statusLabel.setText("Solving with: " + name);
+            setSolveState(SolveState.RUNNING);
+            engine.start(explorer);
+        } else {
+            engine.resetToStart();
+            statusLabel.setText("Reset to start.");
+            setSolveState(SolveState.IDLE);
+            panel.resetPan();
+        }
+        panel.requestFocusInWindow();
     }
 
     private void onGoalReached(int moveCount, int pathLength) {
