@@ -9,15 +9,22 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Wires together the Maze (data), the BaseExplorer (student algorithm,
  * running on its own thread) and the MazePanel (Swing rendering, on the EDT).
  *
- * Threading model: all mutable path / game-over state is only ever mutated
- * on the Swing Event Dispatch Thread. The explorer's solve() method runs on
- * a dedicated worker thread and calls into attemptMove(), which posts work
- * to the EDT and then blocks on a CountDownLatch until the animation + state
- * mutation is complete.
+ * Threading model:
+ * <ul>
+ *   <li>Logical position and path ({@code logicCell} / {@code logicPath}) are
+ *       owned by the solver thread and updated synchronously before an
+ *       animation is posted — matching PyMazeExplorer's {@code _logic_cell}.</li>
+ *   <li>The visual {@code pathStack} and sprite are mutated only on the EDT
+ *       when an animation starts, so the trail lags the algorithm correctly.</li>
+ * </ul>
  *
- * Additionally tracks a visited set and open frontier so the soft-follow
- * camera can frame the active search front, and supports markExplored /
- * teleport for advanced explorers.
+ * Exploration state:
+ * Two {@link ExplorationState} instances are kept: <i>logical</i> (worker)
+ * and <i>visual</i> (EDT / render). The logical one drives algorithm queries
+ * (hasVisited, teleport eligibility, etc.). The visual one is advanced only
+ * when an animation starts, so the camera and debug focus stay consistent
+ * with what the player has actually seen. Frontier maintenance is incremental
+ * (no full scan of visited cells on every move).
  */
 public class MazeEngine {
 
@@ -27,11 +34,22 @@ public class MazeEngine {
 
     private final Maze maze;
     private final MazePanel panel;
+
+    /** Visual trail — mutated only on the EDT. */
     private final Deque<Cell> pathStack = new ArrayDeque<>();
-    /** Every cell the explorer has successfully stepped onto (or started on). */
-    private final Set<Cell> visited = new HashSet<>();
-    /** Visited cells that still have at least one unvisited open neighbor. */
-    private final Set<Cell> visitedOpen = new HashSet<>();
+
+    /**
+     * Logical path / position owned by the solver thread.
+     * Updated before animations are posted so canMove / getRow / etc. are
+     * always consistent with the algorithm, even while the sprite lags.
+     */
+    private final List<Cell> logicPath = new ArrayList<>();
+    private Cell logicCell;
+
+    /** Logical state (worker thread) vs visual state (EDT / render thread). */
+    private final ExplorationState logical;
+    private final ExplorationState visual;
+
     private final AtomicInteger moveCount = new AtomicInteger(0);
     private volatile boolean gameOver = false;
     private volatile boolean paused = false;
@@ -42,11 +60,14 @@ public class MazeEngine {
     public MazeEngine(Maze maze, MazePanel panel) {
         this.maze = maze;
         this.panel = panel;
-        pathStack.push(maze.getStart());
-        visited.add(maze.getStart());
-        visitedOpen.add(maze.getStart());
-        panel.setEngineState(maze, pathStack, maze.getStart());
-        recomputeFrontier();
+        Cell start = maze.getStart();
+        pathStack.push(start);
+        logicPath.add(start);
+        logicCell = start;
+        this.logical = new ExplorationState(maze, start);
+        this.visual = new ExplorationState(maze, start);
+        panel.setEngineState(maze, pathStack, start);
+        panel.setFrontier(new ArrayList<>(visual.getFrontier()));
     }
 
     public void setGoalListener(GoalListener listener) {
@@ -100,17 +121,19 @@ public class MazeEngine {
         } catch (InterruptedException ignored) {
         }
 
+        Cell start = maze.getStart();
         pathStack.clear();
-        pathStack.push(maze.getStart());
-        visited.clear();
-        visited.add(maze.getStart());
-        visitedOpen.clear();
-        visitedOpen.add(maze.getStart());
+        pathStack.push(start);
+        logicPath.clear();
+        logicPath.add(start);
+        logicCell = start;
+        logical.reset(start);
+        visual.reset(start);
         moveCount.set(0);
         gameOver = false;
         paused = false;
-        panel.setEngineState(maze, pathStack, maze.getStart());
-        recomputeFrontier();
+        panel.setEngineState(maze, pathStack, start);
+        panel.setFrontier(new ArrayList<>(visual.getFrontier()));
         panel.repaint();
     }
 
@@ -148,39 +171,14 @@ public class MazeEngine {
     }
 
     boolean canMove(Direction dir) {
-        Cell current = pathStack.peek();
-        Cell target = current.moved(dir);
+        Cell target = logicCell.moved(dir);
+        // Openness is enough for "can I try this direction"; the visit check
+        // is only needed when we actually discover a new cell.
         return maze.isOpen(target);
     }
 
     boolean hasVisited(Cell cell) {
-        return visited.contains(cell);
-    }
-
-    /**
-     * Open leaves = visited cells that still have an unvisited open neighbor.
-     * Derived from the maze + visited set so explorers never manage a frontier.
-     */
-    private void recomputeFrontier() {
-        List<Cell> frontier = new ArrayList<>();
-        Set<Cell> deadEnds = new HashSet<>();
-        for (Cell cell : visitedOpen) {
-            boolean hasOpenNeighbor = false;
-            for (Direction d : Direction.values()) {
-                Cell neighbor = cell.moved(d);
-                if (maze.isOpen(neighbor) && !visited.contains(neighbor)) {
-                    hasOpenNeighbor = true;
-                    break;
-                }
-            }
-            if (hasOpenNeighbor) {
-                frontier.add(cell);
-            } else {
-                deadEnds.add(cell);
-            }
-        }
-        visitedOpen.removeAll(deadEnds);
-        panel.setFrontier(frontier);
+        return logical.isVisited(cell);
     }
 
     /** Called by BaseExplorer. Runs on the solver thread; blocks until the animation completes. */
@@ -193,7 +191,7 @@ public class MazeEngine {
         final Thread myThread = Thread.currentThread();
         moveCount.incrementAndGet();
 
-        Cell current = pathStack.peek();
+        Cell current = logicCell;
         Cell target = current.moved(dir);
 
         if (!maze.isOpen(target)) {
@@ -209,8 +207,21 @@ public class MazeEngine {
             return false;
         }
 
-        Cell previous = secondFromTop();
-        boolean backingUp = previous != null && previous.equals(target);
+        // Update logical path on the worker thread (mirrors Python _logic_path).
+        boolean backingUp = logicPath.size() >= 2
+                && logicPath.get(logicPath.size() - 2).equals(target);
+        if (backingUp) {
+            logicPath.remove(logicPath.size() - 1);
+        } else {
+            logicPath.add(target);
+        }
+        logicCell = target;
+
+        // Only the first time we step onto a cell do we expand the logical
+        // visited set / frontier. Re-visiting (backtracking) is a no-op.
+        logical.visit(target);
+
+        final List<Cell> pathSnapshot = List.copyOf(logicPath);
 
         CountDownLatch latch = new CountDownLatch(1);
         SwingUtilities.invokeLater(() -> {
@@ -218,14 +229,17 @@ public class MazeEngine {
                 latch.countDown();
                 return;
             }
-            if (backingUp) {
-                pathStack.pop();
-            } else {
-                pathStack.push(target);
+            // Rebuild visual path stack from the logical snapshot.
+            pathStack.clear();
+            for (int i = pathSnapshot.size() - 1; i >= 0; i--) {
+                pathStack.push(pathSnapshot.get(i));
             }
-            visited.add(target);
-            visitedOpen.add(target);
-            recomputeFrontier();
+
+            // Advance the *visual* exploration state in lock-step with the
+            // animation. This keeps the camera / debug focus box consistent
+            // with what the player has actually seen.
+            visual.visit(target);
+            panel.setFrontier(new ArrayList<>(visual.getFrontier()));
             panel.markExplored(target);
             panel.invalidateTrailCache();
             panel.animateMove(current, target, latch);
@@ -235,7 +249,7 @@ public class MazeEngine {
         if (target.equals(maze.getGoal())) {
             gameOver = true;
             int finalMoves = moveCount.get();
-            int pathLen = pathStack.size();
+            int pathLen = logicPath.size();
             SwingUtilities.invokeLater(() -> {
                 if (goalListener != null) goalListener.onGoalReached(finalMoves, pathLen);
             });
@@ -254,9 +268,22 @@ public class MazeEngine {
         }
         waitIfPaused();
 
-        Cell current = pathStack.peek();
-        if (cell.equals(current)) return true;
-        if (!visited.contains(cell)) return false;
+        Cell current = logicCell;
+        if (cell.equals(current)) {
+            return true;
+        }
+        if (!logical.canVisit(cell)) {
+            return false;
+        }
+
+        // Discovering a frontier neighbor via visit expands the logical visited
+        // set the same way a normal step would.
+        logical.visit(cell);
+
+        // Reset logical path to a single cell (visit is a jump, not a step).
+        logicPath.clear();
+        logicPath.add(cell);
+        logicCell = cell;
 
         final Thread myThread = Thread.currentThread();
         CountDownLatch latch = new CountDownLatch(1);
@@ -267,6 +294,10 @@ public class MazeEngine {
             }
             pathStack.clear();
             pathStack.push(cell);
+            // Advance visual state; visit is a no-op when the cell was already known.
+            visual.visit(cell);
+            panel.setFrontier(new ArrayList<>(visual.getFrontier()));
+            panel.markExplored(cell);
             panel.invalidateTrailCache();
             panel.animateHop(current, cell, latch);
         });
@@ -275,7 +306,7 @@ public class MazeEngine {
         if (cell.equals(maze.getGoal())) {
             gameOver = true;
             int finalMoves = moveCount.get();
-            int pathLen = pathStack.size();
+            int pathLen = logicPath.size();
             SwingUtilities.invokeLater(() -> {
                 if (goalListener != null) goalListener.onGoalReached(finalMoves, pathLen);
             });
@@ -295,15 +326,6 @@ public class MazeEngine {
         panel.setShowSprite(show);
     }
 
-    private Cell secondFromTop() {
-        int i = 0;
-        for (Cell c : pathStack) {
-            if (i == 1) return c;
-            i++;
-        }
-        return null;
-    }
-
     private void await(CountDownLatch latch) {
         try {
             latch.await();
@@ -311,29 +333,31 @@ public class MazeEngine {
             Thread.currentThread().interrupt();
             throw new MazeStoppedException();
         }
-        if (gameOver && !pathStack.peek().equals(maze.getGoal())) {
+        if (gameOver && !logicCell.equals(maze.getGoal())) {
             throw new MazeStoppedException();
         }
     }
 
-    double getHint() {
-        Cell cur = pathStack.peek();
+    /**
+     * Manhattan distance from {@code cell} (or the logical position if null)
+     * to the goal.
+     */
+    double getHint(Cell cell) {
+        Cell cur = cell != null ? cell : logicCell;
         Cell goal = maze.getGoal();
-        int dr = cur.row - goal.row;
-        int dc = cur.col - goal.col;
-        return Math.sqrt(dr * dr + dc * dc);
+        return (double) (Math.abs(cur.row - goal.row) + Math.abs(cur.col - goal.col));
     }
 
     boolean isAtGoal() {
-        return pathStack.peek().equals(maze.getGoal());
+        return logicCell.equals(maze.getGoal());
     }
 
     int getRow() {
-        return pathStack.peek().row;
+        return logicCell.row;
     }
 
     int getCol() {
-        return pathStack.peek().col;
+        return logicCell.col;
     }
 
     int getMoveCount() {

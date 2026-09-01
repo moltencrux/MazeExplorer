@@ -34,8 +34,10 @@ import java.util.List;
  *  - Call {@link #setShowSprite(boolean)} to hide the red agent dot (useful
  *    for frontier-style search where the highlight carries the visual).
  *
- * The camera automatically frames open leaves (visited cells that still have
- * an unvisited open neighbor). Students do not need to manage that.
+ * The camera automatically frames open leaves (cells that have been *visually*
+ * revealed and still have an unvisited open neighbor). Students do not need to
+ * manage that; the visual frontier lags the algorithm so it stays in sync with
+ * the animation.
  *
  * You do NOT get direct access to the maze's wall layout. The only way to
  * find out what's around you is to try moving (or call the canMove* helpers)
@@ -126,7 +128,7 @@ public abstract class BaseExplorer {
      * maze always does.
      */
     protected final double getHint() {
-        return engine.getHint();
+        return engine.getHint(null);
     }
 
     /** True if the explorer is currently standing on the goal square. */
