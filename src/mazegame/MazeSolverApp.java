@@ -2,6 +2,7 @@ package mazegame;
 
 import mazegame.explorers.RandomWalkExplorer;
 import mazegame.explorers.WallFollowerExplorer;
+import mazegame.explorers.AStarExplorer;
 
 import javax.swing.*;
 import java.awt.*;
@@ -34,6 +35,7 @@ public class MazeSolverApp extends JFrame {
     static {
         EXPLORERS.put("Random Walk (example)", RandomWalkExplorer::new);
         EXPLORERS.put("Wall Follower (example)", WallFollowerExplorer::new);
+        EXPLORERS.put("A* Explorer", AStarExplorer::new);
         // Add your own strategy here, e.g.:
         // EXPLORERS.put("My DFS Explorer", MyDfsExplorer::new);
     }
