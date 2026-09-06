@@ -17,7 +17,7 @@ import java.util.Random;
  */
 public class Maze {
 
-    private final boolean[][] wall; // wall[row][col] == true means blocked
+    protected final boolean[][] wall; // wall[row][col] == true means blocked
     private final int rows;
     private final int cols;
     private final Cell start;
@@ -43,7 +43,7 @@ public class Maze {
         this.goal = new Cell(rows - 2, cols - 2);
     }
 
-    private void carve(Random rand, int cellsWide, int cellsHigh) {
+    protected void carve(Random rand, int cellsWide, int cellsHigh) {
         boolean[][] visited = new boolean[cellsHigh][cellsWide];
         Deque<int[]> stack = new ArrayDeque<>();
         int startR = 0, startC = 0;

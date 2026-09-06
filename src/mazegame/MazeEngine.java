@@ -9,19 +9,16 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Wires together the Maze (data), the BaseExplorer (student algorithm,
  * running on its own thread) and the MazePanel (Swing rendering, on the EDT).
  *
- * Threading model:
- * <ul>
- *   <li>Logical position and path ({@code logicCell} / {@code logicPath}) are
- *       owned by the solver thread and updated synchronously before an
- *       animation is posted — matching PyMazeExplorer's {@code _logic_cell}.</li>
- *   <li>The visual {@code pathStack} and sprite are mutated only on the EDT
- *       when an animation starts, so the trail lags the algorithm correctly.</li>
- * </ul>
+ * Threading model: all mutable path / game-over state is only ever mutated
+ * on the Swing Event Dispatch Thread. The explorer's solve() method runs on
+ * a dedicated worker thread and calls into attemptMove(), which posts work
+ * to the EDT and then blocks on a CountDownLatch until the animation + state
+ * mutation is complete.
  *
  * Exploration state:
  * Two {@link ExplorationState} instances are kept: <i>logical</i> (worker)
  * and <i>visual</i> (EDT / render). The logical one drives algorithm queries
- * (hasVisited, teleport eligibility, etc.). The visual one is advanced only
+ * (hasVisited, visit eligibility, etc.). The visual one is advanced only
  * when an animation starts, so the camera and debug focus stay consistent
  * with what the player has actually seen. Frontier maintenance is incremental
  * (no full scan of visited cells on every move).
@@ -34,8 +31,6 @@ public class MazeEngine {
 
     private final Maze maze;
     private final MazePanel panel;
-
-    /** Visual trail — mutated only on the EDT. */
     private final Deque<Cell> pathStack = new ArrayDeque<>();
 
     /**
@@ -172,13 +167,18 @@ public class MazeEngine {
 
     boolean canMove(Direction dir) {
         Cell target = logicCell.moved(dir);
-        // Openness is enough for "can I try this direction"; the visit check
-        // is only needed when we actually discover a new cell.
-        return maze.isOpen(target);
+        // From the current (visited) cell, an orthogonal neighbor is visitable
+        // iff it is open — same predicate as logical.canVisit.
+        return logical.canVisit(target);
     }
 
     boolean hasVisited(Cell cell) {
         return logical.isVisited(cell);
+    }
+
+    /** True if {@link #attemptVisit} would succeed (no animation / no state change). */
+    boolean canVisit(Cell cell) {
+        return logical.canVisit(cell);
     }
 
     /** Called by BaseExplorer. Runs on the solver thread; blocks until the animation completes. */
@@ -258,11 +258,13 @@ public class MazeEngine {
     }
 
     /**
-     * Instantly move the sprite to a previously visited cell.
-     * Returns true on success, false if the cell has never been visited
-     * (or is the current cell - treated as a no-op success).
+     * Instantly move to a reachable cell: any already-visited cell, or an
+     * open cell orthogonally adjacent to a visited cell.
+     * Returns true on success (including a no-op when already there).
+     * First visit onto a new cell marks it visited.
+     * Does not increment the move counter.
      */
-    boolean attemptTeleport(Cell cell) {
+    boolean attemptVisit(Cell cell) {
         if (gameOver || Thread.currentThread().isInterrupted()) {
             throw new MazeStoppedException();
         }

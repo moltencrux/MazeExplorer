@@ -10,7 +10,7 @@ import java.util.Set;
  *
  * Two instances are used in {@link MazeEngine}:
  * <ul>
- *   <li><b>logical</b> — worker / algorithm thread (drives hasVisited, teleport eligibility)</li>
+ *   <li><b>logical</b> — worker / algorithm thread (drives hasVisited, visit eligibility)</li>
  *   <li><b>visual</b> — EDT / render thread — advanced only when an animation starts,
  *       so the camera and focus stay consistent with what the player has actually seen</li>
  * </ul>
@@ -38,18 +38,35 @@ public final class ExplorationState {
         return Collections.unmodifiableSet(frontier);
     }
 
-    /** True if the cell is open and has not yet been visited. */
+    /**
+     * True if visiting {@code cell} is allowed: already visited, or open and
+     * orthogonally adjacent to at least one visited cell.
+     */
     public boolean canVisit(Cell cell) {
-        return maze.isOpen(cell) && !visited.contains(cell);
+        if (visited.contains(cell)) {
+            return true;
+        }
+        if (!maze.isOpen(cell)) {
+            return false;
+        }
+        for (Direction d : Direction.values()) {
+            if (visited.contains(cell.moved(d))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
      * Mark {@code cell} visited and maintain the frontier incrementally.
      * Caller is responsible for ensuring this is a legal discovery
-     * (e.g. an adjacent open cell reached by a normal move).
+     * (e.g. an adjacent open cell reached by a normal move, or via visit).
      * Re-visiting is a no-op.
      */
     public void visit(Cell cell) {
+        if (!canVisit(cell)) {
+            return;
+        }
         if (visited.contains(cell)) {
             return;
         }

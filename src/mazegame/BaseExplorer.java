@@ -1,13 +1,11 @@
 package mazegame;
 
-import java.util.List;
-
 /**
  * BaseExplorer is the class students subclass to implement a maze-solving
- * strategy (e.g. depth-first search, wall-following, A*, etc).
+ * strategy (depth-first search, wall-following, A*, etc.).
  *
  * How it works:
- *  - Override {@link #solve()}. This method is your algorithm's entry point.
+ *  - Override {@link #solve()}. This method is the algorithm's entry point.
  *    It runs on its own background thread, so you are free to use a loop,
  *    recursion, a Stack, a Queue -- whatever your algorithm needs -- without
  *    freezing the display.
@@ -15,22 +13,21 @@ import java.util.List;
  *    {@link #moveRight()} to attempt to move one square. Each call blocks
  *    until the move animation finishes and returns true if the move
  *    succeeded, or false if it was blocked by a wall (or the edge of the
- *    maze). A false return does NOT move you -- you're still on the same
- *    square.
+ *    maze). A false return does NOT move you.
  *  - Call {@link #canMoveUp()}, {@link #canMoveDown()}, {@link #canMoveLeft()},
  *    or {@link #canMoveRight()} to test whether a move would succeed without
  *    actually performing it (no animation, no path change, no move count).
- *  - Call {@link #teleport(Cell)} to jump instantly to a previously visited
- *    cell. Returns true if the cell has been visited, false otherwise.
+ *  - Call {@link #visit(Cell)} to jump to a reachable cell: any previously
+ *    visited cell, or an open cell orthogonally adjacent to a visited cell.
+ *    First visit onto a new cell marks it visited. Returns true on success.
+ *  - Call {@link #canVisit(Cell)} to test whether {@code visit(cell)} would
+ *    succeed (no animation, no state change).
  *  - Call {@link #hasVisited(Cell)} to check whether a cell is in the visited set.
  *  - Call {@link #isAtGoal()} to check if you've reached the goal.
- *  - Call {@link #getHint()} for a heuristic value (straight-line distance
- *    from your current square to the goal) that some algorithms -- like
- *    greedy best-first search or A* -- can use to decide which direction
- *    looks most promising. You are never required to use it.
+ *  - Call {@link #getHint()} / {@link #getHint(Cell)} for a heuristic value
+ *    (Manhattan distance from your current square, or from an arbitrary cell,
+ *    to the goal).
  *  - Call {@link #getRow()} / {@link #getCol()} to see where you currently are.
- *  - Call {@link #markExplored(Cell)} to highlight a cell in the exploration
- *    overlay (optional; the engine already marks cells you step onto).
  *  - Call {@link #setShowSprite(boolean)} to hide the red agent dot (useful
  *    for frontier-style search where the highlight carries the visual).
  *
@@ -39,10 +36,9 @@ import java.util.List;
  * manage that; the visual frontier lags the algorithm so it stays in sync with
  * the animation.
  *
- * You do NOT get direct access to the maze's wall layout. The only way to
- * find out what's around you is to try moving (or call the canMove* helpers)
- * and see whether it succeeds. That's the point of the exercise!
- * Teleport only works for cells you have already stepped onto via move_*.
+ * You do NOT get direct access to the maze's wall layout. The only way to find
+ * out what's around you is to try moving (or call the canMove* helpers).
+ * {@code visit} works for visited cells and for open cells next to the visited set.
  */
 public abstract class BaseExplorer {
 
@@ -108,12 +104,20 @@ public abstract class BaseExplorer {
     }
 
     /**
-     * Jump to a previously visited cell.
-     * Returns true if the teleport succeeded (cell was visited, or is the
-     * current cell). Returns false if the cell has never been stepped on.
+     * Jump to a reachable cell: any previously visited cell, or an open cell
+     * orthogonally adjacent to a visited cell. First visit onto a new cell
+     * marks it visited. Returns true on success (including a no-op when
+     * already there).
      */
-    protected final boolean teleport(Cell cell) {
-        return engine.attemptTeleport(cell);
+    protected final boolean visit(Cell cell) {
+        return engine.attemptVisit(cell);
+    }
+
+    /**
+     * True if {@link #visit(Cell)} would succeed (no animation / no state change).
+     */
+    protected final boolean canVisit(Cell cell) {
+        return engine.canVisit(cell);
     }
 
     /** True if the explorer has previously stepped onto this cell. */
@@ -122,13 +126,18 @@ public abstract class BaseExplorer {
     }
 
     /**
-     * Returns a heuristic hint value for the current square: the straight-line
-     * (Euclidean) distance to the goal. Smaller is closer. Not every maze
-     * variant is guaranteed to provide a meaningful hint, but the default
-     * maze always does.
+     * Manhattan distance from the current square to the goal. Smaller is closer.
      */
     protected final double getHint() {
         return engine.getHint(null);
+    }
+
+    /**
+     * Manhattan distance from {@code cell} to the goal. Smaller is closer.
+     * Does not move the explorer.
+     */
+    protected final double getHint(Cell cell) {
+        return engine.getHint(cell);
     }
 
     /** True if the explorer is currently standing on the goal square. */
@@ -153,22 +162,6 @@ public abstract class BaseExplorer {
     /** Total number of moves attempted so far (successful or not). */
     protected final int getMoveCount() {
         return engine.getMoveCount();
-    }
-
-    /**
-     * Highlight a cell in the exploration overlay.
-     * If cell is null, marks the explorer's current position.
-     */
-    protected final void markExplored(Cell cell) {
-        if (cell == null) {
-            cell = new Cell(engine.getRow(), engine.getCol());
-        }
-        engine.markExplored(cell);
-    }
-
-    /** Mark several cells at once. */
-    protected final void markExploredMany(List<Cell> cells) {
-        engine.markExploredMany(cells);
     }
 
     /**

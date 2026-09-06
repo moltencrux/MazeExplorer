@@ -681,7 +681,7 @@ public class MazePanel extends JPanel {
     }
 
     void animateHop(Cell from, Cell to, CountDownLatch latch) {
-        // Instant teleport for non-adjacent moves (used by teleport API)
+        // Instant hop for non-adjacent moves (used by visit API)
         Point2D toPx = cellCenter(to);
         spriteCell = to;
         spriteX = toPx.x;
