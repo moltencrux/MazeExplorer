@@ -30,5 +30,6 @@ public class WallFollowerExplorer extends BaseExplorer {
             move(dirs[turn]);
             turn = (turn + 3) % 4;
         }
+        return null;
     }
 }

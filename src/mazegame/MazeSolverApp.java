@@ -360,12 +360,12 @@ public class MazeSolverApp extends JFrame {
         panel.requestFocusInWindow();
     }
 
-    private void onGoalReached(int moveCount, int pathLength) {
+    private void onGoalReached(int moveCount, int pathSteps) {
         setSolveState(SolveState.IDLE);
-        statusLabel.setText("Solved! " + moveCount + " moves attempted, final path length " + pathLength + ".");
+        statusLabel.setText("Solved! " + moveCount + " moves attempted, solution path " + pathSteps + " steps.");
         String message = String.format(
-                "You reached the goal!%n%nMoves attempted: %d%nFinal path length: %d squares%n%nPlay again with a new maze?",
-                moveCount, pathLength);
+                "You reached the goal!%n%nMoves attempted: %d%nSolution path: %d steps%n%nPlay again with a new maze?",
+                moveCount, pathSteps);
         int choice = JOptionPane.showConfirmDialog(this, message, "Maze Solved!",
                 JOptionPane.YES_NO_OPTION, JOptionPane.INFORMATION_MESSAGE);
         if (choice == JOptionPane.YES_OPTION) {

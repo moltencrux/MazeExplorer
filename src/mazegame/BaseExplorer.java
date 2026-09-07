@@ -1,5 +1,7 @@
 package mazegame;
 
+import java.util.List;
+
 /**
  * BaseExplorer is the class students subclass to implement a maze-solving
  * strategy (depth-first search, wall-following, A*, etc.).
@@ -8,7 +10,10 @@ package mazegame;
  *  - Override {@link #solve()}. This method is the algorithm's entry point.
  *    It runs on its own background thread, so you are free to use a loop,
  *    recursion, a Stack, a Queue -- whatever your algorithm needs -- without
- *    freezing the display.
+ *    freezing the display. Optionally return the path from start to goal
+ *    (list of cells); the engine uses that for the reported path length.
+ *    Return {@code null} to fall back to the engine's move-stack trail
+ *    (fine for simple walkers that only use {@code move*}).
  *  - Call {@link #moveUp()}, {@link #moveDown()}, {@link #moveLeft()}, or
  *    {@link #moveRight()} to attempt to move one square. Each call blocks
  *    until the move animation finishes and returns true if the move
@@ -52,8 +57,15 @@ public abstract class BaseExplorer {
     /**
      * Your maze-solving algorithm goes here. This runs on a background
      * thread, so blocking calls like moveUp() are safe to use in a loop.
+     *
+     * <p>Optionally return the path from start to goal (inclusive list of
+     * cells) when you find a solution. The engine uses that for the reported
+     * path length. Return {@code null} (or omit a meaningful return) to fall
+     * back to the engine's move-stack trail — fine for simple walkers that
+     * only use {@code move*}. Explorers that use {@link #visit(Cell)} should
+     * return a reconstructed path so path length is correct.
      */
-    public abstract void solve();
+    public abstract List<Cell> solve();
 
     protected final boolean move(Direction dir) {
         return engine.attemptMove(dir);
@@ -159,7 +171,10 @@ public abstract class BaseExplorer {
         return new Cell(getRow(), getCol());
     }
 
-    /** Total number of moves attempted so far (successful or not). */
+    /**
+     * Number of cells newly entered so far (successful steps onto previously
+     * unvisited cells, including via {@link #visit(Cell)}).
+     */
     protected final int getMoveCount() {
         return engine.getMoveCount();
     }

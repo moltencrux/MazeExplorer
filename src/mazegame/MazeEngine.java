@@ -9,11 +9,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Wires together the Maze (data), the BaseExplorer (student algorithm,
  * running on its own thread) and the MazePanel (Swing rendering, on the EDT).
  *
- * Threading model: all mutable path / game-over state is only ever mutated
- * on the Swing Event Dispatch Thread. The explorer's solve() method runs on
- * a dedicated worker thread and calls into attemptMove(), which posts work
- * to the EDT and then blocks on a CountDownLatch until the animation + state
- * mutation is complete.
+ * Threading model:
+ * <ul>
+ *   <li>Logical position and path ({@code logicCell} / {@code logicPath}) are
+ *       owned by the solver thread and updated synchronously before an
+ *       animation is posted — matching PyMazeExplorer's {@code _logic_cell}.</li>
+ *   <li>The visual {@code pathStack} and sprite are mutated only on the EDT
+ *       when an animation starts, so the trail lags the algorithm correctly.</li>
+ * </ul>
  *
  * Exploration state:
  * Two {@link ExplorationState} instances are kept: <i>logical</i> (worker)
@@ -22,15 +25,25 @@ import java.util.concurrent.atomic.AtomicInteger;
  * when an animation starts, so the camera and debug focus stay consistent
  * with what the player has actually seen. Frontier maintenance is incremental
  * (no full scan of visited cells on every move).
+ *
+ * Path reporting:
+ * When {@link BaseExplorer#solve()} returns a non-empty list of cells, that
+ * path is preferred for the reported solution length (needed for visit-based
+ * searches where the engine trail is not the solution). Otherwise the engine
+ * falls back to the move-stack trail. Goal stats are recorded when solve()
+ * returns, not at the moment the goal cell is first entered.
  */
 public class MazeEngine {
 
     public interface GoalListener {
-        void onGoalReached(int moveCount, int pathLength);
+        /** @param moveCount cells newly entered; @param pathSteps edges on solution path */
+        void onGoalReached(int moveCount, int pathSteps);
     }
 
     private final Maze maze;
     private final MazePanel panel;
+
+    /** Visual trail — mutated only on the EDT. */
     private final Deque<Cell> pathStack = new ArrayDeque<>();
 
     /**
@@ -137,7 +150,32 @@ public class MazeEngine {
         explorer.bind(this);
         solverThread = new Thread(() -> {
             try {
-                explorer.solve();
+                List<Cell> result = explorer.solve();
+                if (Thread.currentThread().isInterrupted()) {
+                    return;
+                }
+                // Prefer an explicit path from the explorer (needed for
+                // visit-based searches where the engine trail is not the
+                // solution). Fall back to the move-stack trail for simple
+                // walkers that only use move_* and return null.
+                final int steps;
+                if (result != null && !result.isEmpty()) {
+                    logicPath.clear();
+                    logicPath.addAll(result);
+                    logicCell = result.get(result.size() - 1);
+                    steps = Math.max(0, result.size() - 1);
+                } else if (isAtGoal()) {
+                    steps = Math.max(0, logicPath.size() - 1);
+                } else {
+                    return;
+                }
+                gameOver = true;
+                final int finalMoves = moveCount.get();
+                SwingUtilities.invokeLater(() -> {
+                    if (goalListener != null) {
+                        goalListener.onGoalReached(finalMoves, steps);
+                    }
+                });
             } catch (MazeStoppedException ignored) {
                 // normal: the maze was reset / stopped while we were running
             } catch (Exception ex) {
@@ -189,10 +227,13 @@ public class MazeEngine {
         waitIfPaused();
 
         final Thread myThread = Thread.currentThread();
-        moveCount.incrementAndGet();
-
         Cell current = logicCell;
         Cell target = current.moved(dir);
+
+        // Count only the first entry onto a cell (matches PyMazeExplorer).
+        if (!hasVisited(target)) {
+            moveCount.incrementAndGet();
+        }
 
         if (!maze.isOpen(target)) {
             CountDownLatch latch = new CountDownLatch(1);
@@ -247,12 +288,9 @@ public class MazeEngine {
         await(latch);
 
         if (target.equals(maze.getGoal())) {
+            // Stop the explorer loop; final path stats are recorded when
+            // solve() returns (so visit-based solvers can supply a path).
             gameOver = true;
-            int finalMoves = moveCount.get();
-            int pathLen = logicPath.size();
-            SwingUtilities.invokeLater(() -> {
-                if (goalListener != null) goalListener.onGoalReached(finalMoves, pathLen);
-            });
         }
         return true;
     }
@@ -261,8 +299,12 @@ public class MazeEngine {
      * Instantly move to a reachable cell: any already-visited cell, or an
      * open cell orthogonally adjacent to a visited cell.
      * Returns true on success (including a no-op when already there).
-     * First visit onto a new cell marks it visited.
-     * Does not increment the move counter.
+     * First visit onto a new cell marks it visited and increments the move count.
+     *
+     * <p>Visit does not maintain a meaningful start→goal trail (the engine
+     * only tracks the current cell). Explorers that use visit should return
+     * the reconstructed path from {@link BaseExplorer#solve()} so path length
+     * is correct.
      */
     boolean attemptVisit(Cell cell) {
         if (gameOver || Thread.currentThread().isInterrupted()) {
@@ -278,11 +320,17 @@ public class MazeEngine {
             return false;
         }
 
-        // Discovering a frontier neighbor via visit expands the logical visited
-        // set the same way a normal step would.
+        if (!hasVisited(cell)) {
+            moveCount.incrementAndGet();
+        }
+
+        // Discovering a frontier neighbor via visit expands the logical
+        // visited set the same way a normal step would.
         logical.visit(cell);
 
         // Reset logical path to a single cell (visit is a jump, not a step).
+        // Trail is not the solution path — only the current cell is recorded
+        // for sprite position.
         logicPath.clear();
         logicPath.add(cell);
         logicCell = cell;
@@ -307,11 +355,6 @@ public class MazeEngine {
 
         if (cell.equals(maze.getGoal())) {
             gameOver = true;
-            int finalMoves = moveCount.get();
-            int pathLen = logicPath.size();
-            SwingUtilities.invokeLater(() -> {
-                if (goalListener != null) goalListener.onGoalReached(finalMoves, pathLen);
-            });
         }
         return true;
     }
